@@ -109,7 +109,10 @@ def main():
         except:
             image_library = 'library'
             tar_name = image_name
-        image_tag = 'latest'
+        try:
+            tar_name, image_tag = tar_name.split(':')
+        except:
+            image_tag = 'latest'
         if os.path.exists(os.path.join(os.getcwd(), tar_name + '.tar')):
             print('镜像已存在')
             return
