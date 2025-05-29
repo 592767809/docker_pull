@@ -96,8 +96,8 @@ def main(ctx: click.Context, *args: Any, **kwargs: Any):
     manifest_v1 = requests.get(f'{image_registry}/v2/{img_user}/{img_name}/manifests/{digest}', headers=headers, proxies=proxies).json()
     logger.info('获取镜像清单列表')
     logger.info(manifest_v1["config"]["digest"])
-    # 获取镜像元数据
     config = requests.get(f'{image_registry}/v2/{img_user}/{img_name}/blobs/{manifest_v1["config"]["digest"]}', headers=headers, proxies=proxies).json()
+    logger.info('获取镜像元数据')
     with open(os.path.join(temp_dir, manifest_v1["config"]["digest"][7:] + '.json'), 'w', encoding='utf-8') as f:
         f.write(json.dumps(config, separators=(',', ':')))
     # 创建manifest.json框架
