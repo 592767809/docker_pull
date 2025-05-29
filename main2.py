@@ -1,8 +1,10 @@
 
+import os
 import click
 import requests
 import threading
 from typing import Any
+from loguru import logger
 
 
 @click.command()
@@ -19,6 +21,7 @@ def main(ctx: click.Context, *args: Any, **kwargs: Any):
     else:
         proxies = None
     # 分析镜像信息
+    platform = kwargs['architecture']
     img_name = kwargs['image']
     if ':' in img_name:
         img_name, img_tag = img_name.split(':')
@@ -38,9 +41,16 @@ def main(ctx: click.Context, *args: Any, **kwargs: Any):
         img_user = 'library'
     if not img_tag:
         img_tag = 'latest'
-    print(image_registry, img_user, img_name, img_tag)
-
-
+    logger.info('镜像架构：' + platform)
+    logger.info('镜像来源：' + image_registry)
+    logger.info('镜像用户：' + img_user)
+    logger.info('镜像名称：' + img_name)
+    logger.info('镜像标签：' + img_tag)
+    out_name = '_'.join([platform, image_registry, img_user, img_name, img_tag]) + '.tar'
+    logger.info('本地镜像打包路径：' + out_name)
+    if os.path.exists(out_name):
+        logger.info('镜像已存在')
+        return
 
 
 if __name__ == '__main__':
