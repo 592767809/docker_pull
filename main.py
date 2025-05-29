@@ -90,7 +90,7 @@ def main(ctx: click.Context, *args: Any, **kwargs: Any):
     logger.info('获取镜像的digest：' + response.headers['docker-content-digest'])
     response = requests.get(f'{image_registry}/v2/{img_user}/{img_name}/manifests/{response.headers['docker-content-digest']}', headers=headers, proxies=proxies).json()
     logger.info('根据镜像的digest获取不同架构的信息')
-    digest = filter(lambda n: n['platform']['architecture'] == platform, response['manifests']).__next__()['digest']
+    digest = filter(lambda n: n['platform']['architecture'] == platform, response['manifests']).__next__()['digest']  # TODO 无法匹配架构时显示错误信息
     logger.info('选择对应架构的digest')
     logger.info(digest)
     manifest_v1 = requests.get(f'{image_registry}/v2/{img_user}/{img_name}/manifests/{digest}', headers=headers, proxies=proxies).json()
