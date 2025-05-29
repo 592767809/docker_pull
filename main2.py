@@ -9,6 +9,7 @@ import threading
 from typing import Any
 from urllib import parse
 from loguru import logger
+from Crypto.Hash import SHA256
 
 
 @click.command()
