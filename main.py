@@ -90,86 +90,95 @@ def main(ctx: click.Context, *args: Any, **kwargs: Any):
     logger.info('获取镜像的digest：' + response.headers['docker-content-digest'])
     response = requests.get(f'{image_registry}/v2/{img_user}/{img_name}/manifests/{response.headers['docker-content-digest']}', headers=headers, proxies=proxies).json()
     logger.info('根据镜像的digest获取不同架构的信息')
-    digest = filter(lambda n: n['platform']['architecture'] == platform, response['manifests']).__next__()['digest']  # TODO 无法匹配架构时显示错误信息
-    logger.info('选择对应架构的digest')
-    logger.info(digest)
-    manifest_v1 = requests.get(f'{image_registry}/v2/{img_user}/{img_name}/manifests/{digest}', headers=headers, proxies=proxies).json()
-    logger.info('获取镜像清单列表')
-    logger.info(manifest_v1["config"]["digest"])
-    config = requests.get(f'{image_registry}/v2/{img_user}/{img_name}/blobs/{manifest_v1["config"]["digest"]}', headers=headers, proxies=proxies).json()
-    logger.info('获取镜像元数据')
-    with open(os.path.join(temp_dir, manifest_v1["config"]["digest"][7:] + '.json'), 'w', encoding='utf-8') as f:
-        f.write(json.dumps(config, separators=(',', ':')))
-    # 创建manifest.json框架
-    manifest = [{
-        'Config': manifest_v1["config"]["digest"][7:] + '.json',
-        'RepoTags': [raw_name],
-        'Layers': []
-    }]
-    # 开始下载每一个layer
-    logger.info(f'总共需要下载 {len(manifest_v1["layers"])} 个layer')
-    work_queue = queue.Queue(maxsize=0)
-    thread_list = []
-    for layer in manifest_v1["layers"]:
-        work_queue.put(layer)
+    if 'schemaVersion' in response:
+        version = response['schemaVersion']
+        if version == '2':  # 针对不同版本的信息进行下载
+            pass
+        else:
+            pass
+        logger.info('暂不支持这个镜像下载')
+        return
+    else:
+        digest = filter(lambda n: n['platform']['architecture'] == platform, response['manifests']).__next__()['digest']  # TODO 无法匹配架构时显示错误信息
+        logger.info('选择对应架构的digest')
+        logger.info(digest)
+        manifest_v1 = requests.get(f'{image_registry}/v2/{img_user}/{img_name}/manifests/{digest}', headers=headers, proxies=proxies).json()
+        logger.info('获取镜像清单列表')
+        logger.info(manifest_v1["config"]["digest"])
+        config = requests.get(f'{image_registry}/v2/{img_user}/{img_name}/blobs/{manifest_v1["config"]["digest"]}', headers=headers, proxies=proxies).json()
+        logger.info('获取镜像元数据')
+        with open(os.path.join(temp_dir, manifest_v1["config"]["digest"][7:] + '.json'), 'w', encoding='utf-8') as f:
+            f.write(json.dumps(config, separators=(',', ':')))
+        # 创建manifest.json框架
+        manifest = [{
+            'Config': manifest_v1["config"]["digest"][7:] + '.json',
+            'RepoTags': [raw_name],
+            'Layers': []
+        }]
+        # 开始下载每一个layer
+        logger.info(f'总共需要下载 {len(manifest_v1["layers"])} 个layer')
+        work_queue = queue.Queue(maxsize=0)
+        thread_list = []
+        for layer in manifest_v1["layers"]:
+            work_queue.put(layer)
 
-    for t in range(8):
-        thread = threading.Thread(target=down_layer, args=(work_queue, temp_dir, image_registry, img_user, img_name, headers, proxies))
-        thread.start()
-        thread_list.append(thread)
+        for t in range(8):
+            thread = threading.Thread(target=down_layer, args=(work_queue, temp_dir, image_registry, img_user, img_name, headers, proxies))
+            thread.start()
+            thread_list.append(thread)
 
-    for thread in thread_list:
-        thread.join()
+        for thread in thread_list:
+            thread.join()
 
-    parent_id = ''
-    for layer in manifest_v1["layers"]:
-        layer_id = SHA256.new(f'{parent_id}\n{layer["digest"]}\n'.encode()).hexdigest()
-        layer_path = os.path.join(temp_dir, layer_id)
-        if not os.path.exists(layer_path):
-            os.makedirs(layer_path)
-        os.rename(os.path.join(temp_dir, layer["digest"][7:] + '.tar'), os.path.join(layer_path, 'layer.tar'))
-        with open(os.path.join(layer_path, 'VERSION'), 'wb') as f:
-            f.write('1.0'.encode())
-        layer_json = {
-            'id': layer_id,
-            'parent': parent_id,
-            'created': '1970-01-01T00:00:00Z',
-            'container_config': {
-                'Hostname': '',
-                'Domainname': '',
-                'User': '',
-                'AttachStdin': False,
-                'AttachStdout': False,
-                'AttachStderr': False,
-                'Tty': False,
-                'OpenStdin': False,
-                'StdinOnce': False,
-                'Env': None,
-                'Cmd': None,
-                'Image': '',
-                'Volumes': None,
-                'WorkingDir': '',
-                'Entrypoint': None,
-                'OnBuild': None,
-                'Labels': None
-            },
-            'os': config['os']
-        }
-        if not parent_id:
-            del layer_json['parent']
-        with open(os.path.join(layer_path, 'json'), 'wb') as f:
-            f.write(json.dumps(layer_json, ensure_ascii=False, separators=(',', ':')).encode())
-        manifest[0]['Layers'].append(layer_id + '/layer.tar')
-        parent_id = layer_id
-
-    with open(os.path.join(temp_dir, 'manifest.json'), 'wb') as f:
-        f.write(json.dumps(manifest, ensure_ascii=False, separators=(',', ':')).encode())
-    with open(os.path.join(temp_dir, 'repositories'), 'wb') as f:
-        f.write(json.dumps({
-            img_name: {
-                img_tag: parent_id
+        parent_id = ''
+        for layer in manifest_v1["layers"]:
+            layer_id = SHA256.new(f'{parent_id}\n{layer["digest"]}\n'.encode()).hexdigest()
+            layer_path = os.path.join(temp_dir, layer_id)
+            if not os.path.exists(layer_path):
+                os.makedirs(layer_path)
+            os.rename(os.path.join(temp_dir, layer["digest"][7:] + '.tar'), os.path.join(layer_path, 'layer.tar'))
+            with open(os.path.join(layer_path, 'VERSION'), 'wb') as f:
+                f.write('1.0'.encode())
+            layer_json = {
+                'id': layer_id,
+                'parent': parent_id,
+                'created': '1970-01-01T00:00:00Z',
+                'container_config': {
+                    'Hostname': '',
+                    'Domainname': '',
+                    'User': '',
+                    'AttachStdin': False,
+                    'AttachStdout': False,
+                    'AttachStderr': False,
+                    'Tty': False,
+                    'OpenStdin': False,
+                    'StdinOnce': False,
+                    'Env': None,
+                    'Cmd': None,
+                    'Image': '',
+                    'Volumes': None,
+                    'WorkingDir': '',
+                    'Entrypoint': None,
+                    'OnBuild': None,
+                    'Labels': None
+                },
+                'os': config['os']
             }
-        }, ensure_ascii=False, separators=(',', ':')).encode())
+            if not parent_id:
+                del layer_json['parent']
+            with open(os.path.join(layer_path, 'json'), 'wb') as f:
+                f.write(json.dumps(layer_json, ensure_ascii=False, separators=(',', ':')).encode())
+            manifest[0]['Layers'].append(layer_id + '/layer.tar')
+            parent_id = layer_id
+
+        with open(os.path.join(temp_dir, 'manifest.json'), 'wb') as f:
+            f.write(json.dumps(manifest, ensure_ascii=False, separators=(',', ':')).encode())
+        with open(os.path.join(temp_dir, 'repositories'), 'wb') as f:
+            f.write(json.dumps({
+                img_name: {
+                    img_tag: parent_id
+                }
+            }, ensure_ascii=False, separators=(',', ':')).encode())
 
     # 最后打包tar
     with tarfile.open(out_path, "w") as f:
