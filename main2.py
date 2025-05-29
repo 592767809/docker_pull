@@ -4,6 +4,8 @@ import json
 import gzip
 import click
 import queue
+import shutil
+import tarfile
 import requests
 import threading
 from typing import Any
@@ -15,7 +17,7 @@ from Crypto.Hash import SHA256
 @click.command()
 @click.argument("image")
 @click.option("-a", "--architecture", type=str, default='amd64', help='镜像架构 (amd64, arm64, arm/v7)')  # amd64 arm64 arm/v7
-@click.option("-p", "--proxies", type=str, default='', help='设置HTTP代理服务器')  # amd64 arm64 arm/v7
+@click.option("-p", "--proxies", type=str, default='', help='设置HTTP代理服务器')
 @click.pass_context
 def main(ctx: click.Context, *args: Any, **kwargs: Any):
     if kwargs['proxies']:
@@ -52,7 +54,6 @@ def main(ctx: click.Context, *args: Any, **kwargs: Any):
     logger.info('镜像名称：' + img_name)
     logger.info('镜像标签：' + img_tag)
     out_dir = os.path.join(os.getcwd(), '_'.join([platform, image_registry, img_user, img_name, img_tag, 'tar']))
-    blobs_dir = os.path.join(out_dir, 'blobs')
     out_name = '_'.join([platform, image_registry, img_user, img_name, img_tag]) + '.tar'
     logger.info('本地镜像缓存路径：' + out_dir)
     logger.info('本地镜像输出路径：' + out_name)
@@ -61,8 +62,6 @@ def main(ctx: click.Context, *args: Any, **kwargs: Any):
         return
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
-    if not os.path.exists(blobs_dir):
-        os.makedirs(blobs_dir)
     # 判断是否需要token
     image_registry = 'https://' + image_registry
     headers = {
@@ -97,12 +96,12 @@ def main(ctx: click.Context, *args: Any, **kwargs: Any):
     logger.info(manifest_v1["config"]["digest"])
     # 获取镜像元数据
     config = requests.get(f'{image_registry}/v2/{img_user}/{img_name}/blobs/{manifest_v1["config"]["digest"]}', headers=headers, proxies=proxies).json()
-    with open(os.path.join(blobs_dir, manifest_v1["config"]["digest"].split(':')[-1]), 'w', encoding='utf-8') as f:
+    with open(os.path.join(out_dir, manifest_v1["config"]["digest"][7:] + '.json'), 'w', encoding='utf-8') as f:
         f.write(json.dumps(config, separators=(',', ':')))
     # 创建manifest.json框架
     manifest = [{
-        'Config': manifest_v1["config"]["digest"].split(':')[-1],
-        'RepoTags': [f'{img_user}:{img_name}'],
+        'Config': manifest_v1["config"]["digest"][7:] + '.json',
+        'RepoTags': [f'{img_name}:{img_tag}'],
         'Layers': []
     }]
     # 开始下载每一个layer
@@ -111,22 +110,22 @@ def main(ctx: click.Context, *args: Any, **kwargs: Any):
     thread_list = []
     for layer in manifest_v1["layers"]:
         work_queue.put(layer)
-    for t in range(1):
-        thread = threading.Thread(target=down_layer, args=(work_queue, image_registry, img_user, img_name, headers, proxies))
+
+    for t in range(8):
+        thread = threading.Thread(target=down_layer, args=(work_queue, out_dir, image_registry, img_user, img_name, headers, proxies))
         thread.start()
         thread_list.append(thread)
 
     for thread in thread_list:
         thread.join()
 
-    return
     parent_id = ''
     for layer in manifest_v1["layers"]:
-        layer_id = hashlib.sha256(f'{parent_id}{layer["digest"]}'.encode()).hexdigest()
-        layer_path = os.path.join(file_path, layer_id)
+        layer_id = SHA256.new(f'{parent_id}\n{layer["digest"]}\n'.encode()).hexdigest()
+        layer_path = os.path.join(out_dir, layer_id)
         if not os.path.exists(layer_path):
             os.makedirs(layer_path)
-        os.rename(os.path.join(file_path, layer["digest"][7:] + '.tar'), os.path.join(layer_path, 'layer.tar'))
+        os.rename(os.path.join(out_dir, layer["digest"][7:] + '.tar'), os.path.join(layer_path, 'layer.tar'))
         with open(os.path.join(layer_path, 'VERSION'), 'wb') as f:
             f.write('1.0'.encode())
         layer_json = {
@@ -160,38 +159,55 @@ def main(ctx: click.Context, *args: Any, **kwargs: Any):
             f.write(json.dumps(layer_json, ensure_ascii=False, separators=(',', ':')).encode())
         manifest[0]['Layers'].append(layer_id + '/layer.tar')
         parent_id = layer_id
-        print('下载完成： ' + parent_id)
-    with open(os.path.join(file_path, 'manifest.json'), 'wb') as f:
+        logger.info('下载完成： ' + parent_id)
+
+    with open(os.path.join(out_dir, 'manifest.json'), 'wb') as f:
         f.write(json.dumps(manifest, ensure_ascii=False, separators=(',', ':')).encode())
-    with open(os.path.join(file_path, 'repositories'), 'wb') as f:
+    with open(os.path.join(out_dir, 'repositories'), 'wb') as f:
         f.write(json.dumps({
-            image_name: {
-                image_tag: parent_id
+            img_name: {
+                img_tag: parent_id
             }
         }, ensure_ascii=False, separators=(',', ':')).encode())
 
     # 最后打包tar
-    with tarfile.open(os.path.join(os.getcwd(), tar_name + '.tar'), "w") as f:
-        f.add(file_path, arcname=os.path.sep)
-    shutil.rmtree(file_path)
-    print('下载完成 ' + os.path.abspath(os.path.join(os.getcwd(), tar_name + '.tar')))
+    with tarfile.open(out_name, "w") as f:
+        f.add(out_dir, arcname=os.path.sep)
+    shutil.rmtree(out_dir)
+    logger.info('下载完成 ' + out_dir)
 
 
-def down_layer(work_queue, image_registry, img_user, img_name, headers, proxies):
+def down_layer(work_queue, out_dir, image_registry, img_user, img_name, headers, proxies):
     while True:
         if work_queue.empty():
             break
         else:
             layer = work_queue.get()
+            layer_path = os.path.join(out_dir, layer["digest"][7:] + '.tar')
+            layer_gz_path = os.path.join(out_dir, layer["digest"][7:] + '.tar.gz')
+            if os.path.exists(layer_path):
+                if os.path.exists(layer_gz_path):
+                    os.remove(layer_gz_path)
+                continue
             while True:
-                try:
-                    response = requests.get(f'{image_registry}/v2/{img_user}/{img_name}/blobs/{layer["digest"]}', headers=headers, proxies=proxies)
-                    with open(layer_path, 'wb') as f:
-                        f.write(gzip.decompress(response.content))
-                    print('下载完成： ' + os.path.abspath(layer_path))
-                    break
+                try:  # TODO 断点续传
+                    response = requests.get(f'{image_registry}/v2/{img_user}/{img_name}/blobs/{layer["digest"]}', headers=headers, proxies=proxies, stream=True)
+                    file_size = int(response.headers['Content-Length'])
+                    with open(layer_gz_path, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=1024 * 1024 * 5):
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                    if os.path.getsize(layer_gz_path) == file_size:
+                        with open(layer_path, 'wb') as fou, open(layer_gz_path, 'rb') as fin:
+                            fou.write(gzip.decompress(fin.read()))
+                        logger.info('下载完成： ' + layer["digest"])
+                        os.remove(layer_gz_path)
+                        break
+                    else:
+                        os.remove(layer_gz_path)
                 except:
-                    print('链接失败，尝试重试： ' + layer["digest"])
+                    logger.info('链接失败，尝试重试： ' + layer["digest"])
 
 
 if __name__ == '__main__':
