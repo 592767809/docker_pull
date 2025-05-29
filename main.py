@@ -41,8 +41,12 @@ def main(ctx: click.Context, *args: Any, **kwargs: Any):
     if len(img_name) == 3:
         image_registry, img_user, img_name = img_name
     elif len(img_name) == 2:
-        img_user, img_name = img_name
-        image_registry = 'registry-1.docker.io'
+        if '.' in img_name[0]:
+            image_registry, img_name = img_name
+            img_user = 'library'
+        else:
+            img_user, img_name = img_name
+            image_registry = 'registry-1.docker.io'
     else:
         img_name = img_name[0]
         image_registry = 'registry-1.docker.io'
