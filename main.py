@@ -1,246 +1,214 @@
 
 import os
-import ssl
-import sys
 import json
 import gzip
-import socket
+import click
+import queue
 import shutil
 import tarfile
-import hashlib
+import requests
 import threading
-import traceback
-from urllib import parse, request
+from typing import Any
+from urllib import parse
+from loguru import logger
+from Crypto.Hash import SHA256
 
 
-def get_data(url, headers, send_type):
-    url_parse = parse.urlparse(url)
-    socket.setdefaulttimeout(10)
-    i = 0
-    while True:
-        try:
-            if url_parse.scheme == 'https':
-                sock = ssl.wrap_socket(socket.socket(socket.AF_INET, socket.SOCK_STREAM))
-                sock.connect((url_parse.hostname, 443))
-            else:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.connect((url_parse.hostname, 80))
-            break
-        except:
-            i += 1
-            print('链接失败，尝试重试： ' + url)
-            if i == 10:
-                raise Exception('')
-    send_data = send_type + ' ' + url + ' HTTP/1.1\r\n'
-    send_data += 'Host: ' + str(url_parse.hostname) + '\r\n'
-    send_data += 'User-Agent: docker/20.10.23 go/go1.18.10 git-commit/6051f14 kernel/5.10.16.3-microsoft-standard-WSL2 os/linux arch/amd64 UpstreamClient(Docker-Client/20.10.23 \(windows\))' + '\r\n'
-    for key in headers:
-        if type(headers[key]) == list:
-            for each in headers[key]:
-                send_data += key + ':' + each + '\r\n'
-        else:
-            send_data += key + ': ' + headers[key] + '\r\n'
-    send_data += '\r\n'
-    sock.send(send_data.encode())
-    buffer = b''
-    while True:
-        try:
-            temp = sock.recv(1024)
-            if temp:
-                buffer += temp
-            else:
-                break
-        except:
-            if buffer:
-                break
-    temp = buffer[:buffer.find(b'\n')].strip(b'\r')
-    status_code = int(temp.split(b' ')[1].decode())
-    buffer = buffer[buffer.find(b'\n') + 1:]
-    headers = dict()
-    while buffer[buffer.find(b'\n') + 1] != 13 and buffer[buffer.find(b'\n') + 2] != 10:
-        key, value = buffer[:buffer.find(b'\n')].strip(b'\r').split(b': ')
-        headers[key.decode().lower()] = value.decode()
-        buffer = buffer[buffer.find(b'\n') + 1:]
-    key, value = buffer[:buffer.find(b'\n')].strip(b'\r').split(b': ')
-    headers[key.decode().lower()] = value.decode()
-    content = buffer[buffer.find(b'\n') + 3:]
-    return {
-        'status_code': status_code,
-        'headers': headers,
-        'content': content
-    }
-
-
-def get_response(url):
-    i = 0
-    while True:
-        try:
-            response = request.urlopen(url).read()
-            return response
-        except:
-            i += 1
-            print('链接失败，尝试重试： ' + url)
-            if i == 10:
-                raise Exception('')
-
-
-def down_layer(layer, layer_path, base_url, image_library, tar_name, headers):
-    while not os.path.exists(layer_path):
-        try:
-            layer_url = get_data(f'{base_url}/v2/{image_library}/{tar_name}/blobs/{layer["digest"]}', headers, 'GET')['headers']['location']
-            layer_gzip = get_response(layer_url)
-            with open(layer_path, 'wb') as f:
-                f.write(gzip.decompress(layer_gzip))
-            print('下载完成： ' + os.path.abspath(layer_path))
-            break
-        except:
-            print('链接失败，尝试重试： ' + layer["digest"])
-
-
-def main():
-    try:
-        image_name = sys.argv[1]
-        try:
-            base_url = sys.argv[2]
-        except:
-            base_url = 'https://registry-1.docker.io'
-        try:
-            image_library, tar_name = image_name.split('/')
-        except:
-            image_library = 'library'
-            tar_name = image_name
-        try:
-            tar_name, image_tag = tar_name.split(':')
-        except:
-            image_tag = 'latest'
-        if os.path.exists(os.path.join(os.getcwd(), tar_name + '.tar')):
-            print('镜像已存在')
-            return
-        file_path = os.path.join(os.getcwd(), tar_name)
-        if not os.path.exists(file_path):
-            os.makedirs(file_path)
-        platform = 'amd64'
-        token = ''
-        if base_url == 'https://registry-1.docker.io':
-            data = {
-                'scope': f'repository:{image_library}/{tar_name}:pull',
-                'service': 'registry.docker.io'
-            }
-            # 获取请求所需的token
-            response = get_response('https://auth.docker.io/token?' + parse.urlencode(data))
-            try:
-                token = json.loads(response)['token']
-                print('获取token: ' + token)
-            except:
-                print(response)
-                return
-        headers = {
-            'Accept': [
-                'application/vnd.oci.image.manifest.v1+json',
-                'application/vnd.docker.distribution.manifest.v2+json',
-                'application/vnd.docker.distribution.manifest.list.v2+json',
-                'application/vnd.oci.image.index.v1+json',
-                'application/vnd.docker.distribution.manifest.v1+prettyjws',
-                'application/json'
-            ]
+@click.command()
+@click.argument("image")
+@click.option("-a", "--architecture", type=str, default='amd64', help='镜像架构 (amd64, arm64, arm/v7)')  # amd64 arm64 arm/v7
+@click.option("-p", "--proxies", type=str, default='', help='设置HTTP代理服务器')
+@click.pass_context
+def main(ctx: click.Context, *args: Any, **kwargs: Any):
+    if kwargs['proxies']:
+        proxies = {
+            'http': kwargs['proxies'],
+            'https': kwargs['proxies'],
         }
-        if token:
-            headers['Authorization'] = 'Bearer ' + token
+    else:
+        proxies = None
+    # 分析镜像信息
+    platform = kwargs['architecture']
+    img_name = kwargs['image']
+    raw_name = img_name
+    if ':' in img_name:
+        img_name, img_tag = img_name.split(':')
+    else:
+        img_tag = ''
+    img_name = img_name.split('/')
+    if len(img_name) > 3:
+        raise Exception('错误的镜像名： ' + '/'.join(img_name) + (':' + img_tag if img_tag else ''))
+    if len(img_name) == 3:
+        image_registry, img_user, img_name = img_name
+    elif len(img_name) == 2:
+        img_user, img_name = img_name
+        image_registry = 'registry-1.docker.io'
+    else:
+        img_name = img_name[0]
+        image_registry = 'registry-1.docker.io'
+        img_user = 'library'
+    if not img_tag:
+        img_tag = 'latest'
+    logger.info('镜像架构：' + platform)
+    logger.info('镜像来源：' + image_registry)
+    logger.info('镜像用户：' + img_user)
+    logger.info('镜像名称：' + img_name)
+    logger.info('镜像标签：' + img_tag)
+    temp_dir = os.path.join(os.getcwd(), '_'.join([platform, image_registry, img_user, img_name, img_tag, 'tar']))
+    out_name = '_'.join([platform, image_registry, img_user, img_name, img_tag]) + '.tar'
+    out_path = os.path.join(os.getcwd(), out_name)
+    logger.info('本地镜像缓存路径：' + temp_dir)
+    logger.info('本地镜像输出路径：' + out_path)
+    if os.path.exists(out_path):
+        logger.info('镜像已存在')
+        return
+    if not os.path.exists(temp_dir):
+        os.makedirs(temp_dir)
+    # 判断是否需要token
+    image_registry = 'https://' + image_registry
+    headers = {
+        'Accept': ','.join([
+            'application/vnd.oci.image.manifest.v1+json',
+            'application/vnd.docker.distribution.manifest.v2+json',
+            'application/vnd.docker.distribution.manifest.list.v2+json',
+            'application/vnd.oci.image.index.v1+json',
+            'application/vnd.docker.distribution.manifest.v1+prettyjws',
+            'application/json'
+        ])
+    }
+    response = requests.get(image_registry + '/v2/', proxies=proxies)
+    if response.status_code != 200:
+        url = response.headers['www-authenticate'].split('"')[1]
+        service = response.headers['www-authenticate'].split('"')[3]
+        data = {
+            'scope': f'repository:{img_user}/{img_name}:pull',
+            'service': service
+        }
+        response = requests.get(url + '?' + parse.urlencode(data), proxies=proxies).json()
+        headers['Authorization'] = 'Bearer ' + response['token']
+    response = requests.head(f'{image_registry}/v2/{img_user}/{img_name}/manifests/{img_tag}', headers=headers, proxies=proxies)
+    logger.info('获取镜像的digest：' + response.headers['docker-content-digest'])
+    response = requests.get(f'{image_registry}/v2/{img_user}/{img_name}/manifests/{response.headers['docker-content-digest']}', headers=headers, proxies=proxies).json()
+    logger.info('根据镜像的digest获取不同架构的信息')
+    digest = filter(lambda n: n['platform']['architecture'] == platform, response['manifests']).__next__()['digest']
+    logger.info('选择对应架构的digest')
+    logger.info(digest)
+    manifest_v1 = requests.get(f'{image_registry}/v2/{img_user}/{img_name}/manifests/{digest}', headers=headers, proxies=proxies).json()
+    logger.info('获取镜像清单列表')
+    logger.info(manifest_v1["config"]["digest"])
+    # 获取镜像元数据
+    config = requests.get(f'{image_registry}/v2/{img_user}/{img_name}/blobs/{manifest_v1["config"]["digest"]}', headers=headers, proxies=proxies).json()
+    with open(os.path.join(temp_dir, manifest_v1["config"]["digest"][7:] + '.json'), 'w', encoding='utf-8') as f:
+        f.write(json.dumps(config, separators=(',', ':')))
+    # 创建manifest.json框架
+    manifest = [{
+        'Config': manifest_v1["config"]["digest"][7:] + '.json',
+        'RepoTags': [raw_name],
+        'Layers': []
+    }]
+    # 开始下载每一个layer
+    logger.info(f'总共需要下载 {len(manifest_v1["layers"])} 个layer')
+    work_queue = queue.Queue(maxsize=0)
+    thread_list = []
+    for layer in manifest_v1["layers"]:
+        work_queue.put(layer)
 
-        # 获取镜像的digest
-        response = get_data(f'{base_url}/v2/{image_library}/{tar_name}/manifests/{image_tag}', headers, 'HEAD')['headers']
-        print(response)
-        # 根据镜像的digest获取不同架构的信息
-        response = json.loads(get_data(f'{base_url}/v2/{image_library}/{tar_name}/manifests/{response["docker-content-digest"]}', headers, 'GET')['content'].decode())
-        print(response)
-        # 选择对应架构的digest
-        digest = filter(lambda n: n['platform']['architecture'] == platform, response['manifests']).__next__()['digest']
-        print(digest)
-        # 获取镜像清单列表
-        manifest_v1 = json.loads(get_data(f'{base_url}/v2/{image_library}/{tar_name}/manifests/{digest}', headers, 'GET')['content'].decode())
-        print(manifest_v1)
-        # 获取镜像元数据
-        config_url = get_data(f'{base_url}/v2/{image_library}/{tar_name}/blobs/{manifest_v1["config"]["digest"]}', headers, 'GET')['headers']['location']
-        config = get_response(config_url)
-        with open(os.path.join(file_path, manifest_v1["config"]["digest"][7:] + '.json'), 'wb') as f:
-            f.write(config)
-        config = json.loads(config.decode())
-        # 创建manifest.json框架
-        manifest = [{
-            'Config': manifest_v1["config"]["digest"][7:] + '.json',
-            'RepoTags': [f'{image_name}:{image_tag}'],
-            'Layers': []
-        }]
-        print(manifest)
-        # 开始下载每一个layer
-        print(f'总共需要下载 {len(manifest_v1["layers"])} 个layer')
-        thread_list = []
-        for layer in manifest_v1["layers"]:
-            layer_path = os.path.join(file_path, layer["digest"][7:] + '.tar')
-            thread = threading.Thread(target=down_layer, args=(layer, layer_path, base_url, image_library, tar_name, headers))
-            thread.start()
-            thread_list.append(thread)
+    for t in range(8):
+        thread = threading.Thread(target=down_layer, args=(work_queue, temp_dir, image_registry, img_user, img_name, headers, proxies))
+        thread.start()
+        thread_list.append(thread)
 
-        for thread in thread_list:
-            thread.join()
+    for thread in thread_list:
+        thread.join()
 
-        parent_id = ''
-        for layer in manifest_v1["layers"]:
-            layer_id = hashlib.sha256(f'{parent_id}{layer["digest"]}'.encode()).hexdigest()
-            layer_path = os.path.join(file_path, layer_id)
-            if not os.path.exists(layer_path):
-                os.makedirs(layer_path)
-            os.rename(os.path.join(file_path, layer["digest"][7:] + '.tar'), os.path.join(layer_path, 'layer.tar'))
-            with open(os.path.join(layer_path, 'VERSION'), 'wb') as f:
-                f.write('1.0'.encode())
-            layer_json = {
-                'id': layer_id,
-                'parent': parent_id,
-                'created': '1970-01-01T00:00:00Z',
-                'container_config': {
-                    'Hostname': '',
-                    'Domainname': '',
-                    'User': '',
-                    'AttachStdin': False,
-                    'AttachStdout': False,
-                    'AttachStderr': False,
-                    'Tty': False,
-                    'OpenStdin': False,
-                    'StdinOnce': False,
-                    'Env': None,
-                    'Cmd': None,
-                    'Image': '',
-                    'Volumes': None,
-                    'WorkingDir': '',
-                    'Entrypoint': None,
-                    'OnBuild': None,
-                    'Labels': None
-                },
-                'os': config['os']
+    parent_id = ''
+    for layer in manifest_v1["layers"]:
+        layer_id = SHA256.new(f'{parent_id}\n{layer["digest"]}\n'.encode()).hexdigest()
+        layer_path = os.path.join(temp_dir, layer_id)
+        if not os.path.exists(layer_path):
+            os.makedirs(layer_path)
+        os.rename(os.path.join(temp_dir, layer["digest"][7:] + '.tar'), os.path.join(layer_path, 'layer.tar'))
+        with open(os.path.join(layer_path, 'VERSION'), 'wb') as f:
+            f.write('1.0'.encode())
+        layer_json = {
+            'id': layer_id,
+            'parent': parent_id,
+            'created': '1970-01-01T00:00:00Z',
+            'container_config': {
+                'Hostname': '',
+                'Domainname': '',
+                'User': '',
+                'AttachStdin': False,
+                'AttachStdout': False,
+                'AttachStderr': False,
+                'Tty': False,
+                'OpenStdin': False,
+                'StdinOnce': False,
+                'Env': None,
+                'Cmd': None,
+                'Image': '',
+                'Volumes': None,
+                'WorkingDir': '',
+                'Entrypoint': None,
+                'OnBuild': None,
+                'Labels': None
+            },
+            'os': config['os']
+        }
+        if not parent_id:
+            del layer_json['parent']
+        with open(os.path.join(layer_path, 'json'), 'wb') as f:
+            f.write(json.dumps(layer_json, ensure_ascii=False, separators=(',', ':')).encode())
+        manifest[0]['Layers'].append(layer_id + '/layer.tar')
+        parent_id = layer_id
+
+    with open(os.path.join(temp_dir, 'manifest.json'), 'wb') as f:
+        f.write(json.dumps(manifest, ensure_ascii=False, separators=(',', ':')).encode())
+    with open(os.path.join(temp_dir, 'repositories'), 'wb') as f:
+        f.write(json.dumps({
+            img_name: {
+                img_tag: parent_id
             }
-            if not parent_id:
-                del layer_json['parent']
-            with open(os.path.join(layer_path, 'json'), 'wb') as f:
-                f.write(json.dumps(layer_json, ensure_ascii=False, separators=(',', ':')).encode())
-            manifest[0]['Layers'].append(layer_id + '/layer.tar')
-            parent_id = layer_id
-            print('下载完成： ' + parent_id)
-        with open(os.path.join(file_path, 'manifest.json'), 'wb') as f:
-            f.write(json.dumps(manifest, ensure_ascii=False, separators=(',', ':')).encode())
-        with open(os.path.join(file_path, 'repositories'), 'wb') as f:
-            f.write(json.dumps({
-                image_name: {
-                    image_tag: parent_id
-                }
-            }, ensure_ascii=False, separators=(',', ':')).encode())
+        }, ensure_ascii=False, separators=(',', ':')).encode())
 
-        # 最后打包tar
-        with tarfile.open(os.path.join(os.getcwd(), tar_name + '.tar'), "w") as f:
-            f.add(file_path, arcname=os.path.sep)
-        shutil.rmtree(file_path)
-        print('下载完成 ' + os.path.abspath(os.path.join(os.getcwd(), tar_name + '.tar')))
-    except:
-        print(traceback.format_exc())
+    # 最后打包tar
+    with tarfile.open(out_path, "w") as f:
+        f.add(temp_dir, arcname=os.path.sep)
+    shutil.rmtree(temp_dir)
+    logger.info('下载完成 ' + temp_dir)
+
+
+def down_layer(work_queue, out_dir, image_registry, img_user, img_name, headers, proxies):
+    while True:
+        if work_queue.empty():
+            break
+        else:
+            layer = work_queue.get()
+            layer_path = os.path.join(out_dir, layer["digest"][7:] + '.tar')
+            layer_gz_path = os.path.join(out_dir, layer["digest"][7:] + '.tar.gz')
+            if os.path.exists(layer_path):
+                if os.path.exists(layer_gz_path):
+                    os.remove(layer_gz_path)
+                continue
+            while True:
+                try:  # TODO 断点续传
+                    response = requests.get(f'{image_registry}/v2/{img_user}/{img_name}/blobs/{layer["digest"]}', headers=headers, proxies=proxies, stream=True)
+                    file_size = int(response.headers['Content-Length'])
+                    with open(layer_gz_path, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=1024 * 1024 * 5):
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                    if os.path.getsize(layer_gz_path) == file_size:
+                        with open(layer_path, 'wb') as fou, open(layer_gz_path, 'rb') as fin:
+                            fou.write(gzip.decompress(fin.read()))
+                        logger.info('下载完成： ' + layer["digest"])
+                        os.remove(layer_gz_path)
+                        break
+                    else:
+                        os.remove(layer_gz_path)
+                except:
+                    logger.info('链接失败，尝试重试： ' + layer["digest"])
 
 
 if __name__ == '__main__':

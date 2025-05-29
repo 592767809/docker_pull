@@ -2,14 +2,18 @@
 免安装docker下载镜像
 
 # 依赖
-只需要安装python环境，不需要安装任何三方库
+python环境，然后安装三方库
+pip install -r requirements.txt
 
 # 使用方法
 
-python main.py linuxserver/transmission
+## 直接使用
+    python main.py mysql
+    python main.py mysql:8.0.0
+    python main.py linuxserver/transmission
 
-完成后得到transmission.tar镜像
+## 增加代理
+    python main.py mysql -p http://127.0.0.1:7890
 
-python main.py mysql
-
-完成后得到mysql.tar镜像
+## 指定镜像架构
+    python main.py mysql -a amd64
