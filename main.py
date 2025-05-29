@@ -90,16 +90,13 @@ def main(ctx: click.Context, *args: Any, **kwargs: Any):
     logger.info('获取镜像的digest：' + response.headers['docker-content-digest'])
     response = requests.get(f'{image_registry}/v2/{img_user}/{img_name}/manifests/{response.headers['docker-content-digest']}', headers=headers, proxies=proxies).json()
     logger.info('根据镜像的digest获取不同架构的信息')
-    if 'schemaVersion' in response:
-        version = response['schemaVersion']
-        if version == '2':  # 针对不同版本的信息进行下载
-            pass
-        else:
-            pass
-        logger.info('暂不支持这个镜像下载')
-        return
-    else:
-        digest = filter(lambda n: n['platform']['architecture'] == platform, response['manifests']).__next__()['digest']  # TODO 无法匹配架构时显示错误信息
+    if response['mediaType'] == 'application/vnd.oci.image.index.v1+json':
+        try:
+            digest = filter(lambda n: n['platform']['architecture'] == platform, response['manifests']).__next__()['digest']
+        except:
+            logger.info('仅允许选择以下架构')
+            logger.info(', '.join(set([each['platform']['architecture'] for each in response['manifests'] if each['platform']['architecture'] != 'unknown'])))
+            return
         logger.info('选择对应架构的digest')
         logger.info(digest)
         manifest_v1 = requests.get(f'{image_registry}/v2/{img_user}/{img_name}/manifests/{digest}', headers=headers, proxies=proxies).json()
@@ -179,6 +176,12 @@ def main(ctx: click.Context, *args: Any, **kwargs: Any):
                     img_tag: parent_id
                 }
             }, ensure_ascii=False, separators=(',', ':')).encode())
+    elif response['mediaType'] == 'application/vnd.docker.distribution.manifest.v2+json':
+        logger.info('暂不支持这个镜像下载')
+        return
+    else:
+        logger.info('未知的结构：' + response['mediaType'])
+        return
 
     # 最后打包tar
     with tarfile.open(out_path, "w") as f:
