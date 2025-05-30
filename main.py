@@ -72,13 +72,15 @@ def main(ctx: click.Context, *args: Any, **kwargs: Any):
     image_registry = 'https://' + image_registry
     headers = {
         'Accept': ','.join([
-            'application/vnd.oci.image.manifest.v1+json',
+            'application/json',
             'application/vnd.docker.distribution.manifest.v2+json',
             'application/vnd.docker.distribution.manifest.list.v2+json',
             'application/vnd.oci.image.index.v1+json',
+            'application/vnd.oci.image.manifest.v1+json',
             'application/vnd.docker.distribution.manifest.v1+prettyjws',
-            'application/json'
-        ])
+
+        ]),
+        'User-Agent': r'docker/27.3.1 go/go1.22.7 git-commit/41ca978 kernel/6.1.0-18-amd64 os/linux arch/amd64 UpstreamClient(Docker-Client/27.3.1 \(linux\))'
     }
     response = requests.get(image_registry + '/v2/', proxies=proxies)
     if response.status_code != 200:
@@ -94,7 +96,7 @@ def main(ctx: click.Context, *args: Any, **kwargs: Any):
     logger.info('获取镜像的digest：' + response.headers['docker-content-digest'])
     response = requests.get(f'{image_registry}/v2/{img_user}/{img_name}/manifests/{response.headers['docker-content-digest']}', headers=headers, proxies=proxies).json()
     logger.info('根据镜像的digest获取不同架构的信息')
-    if response['mediaType'] == 'application/vnd.oci.image.index.v1+json':
+    if response['mediaType'] == 'application/vnd.oci.image.index.v1+json' or response['mediaType'] == 'application/vnd.docker.distribution.manifest.list.v2+json':
         try:
             digest = filter(lambda n: n['platform']['architecture'] == platform, response['manifests']).__next__()['digest']
         except:
